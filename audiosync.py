@@ -65,10 +65,10 @@ class AudioBeatDetector(threading.Thread):
         self._high_ema = 0.0
 
         # Config (tuneable)
-        self._refractory = 0.18        # ignore re-triggers inside this (s)
+        self._refractory = 0.25        # ignore re-triggers inside this (s) - was 0.18, now stricter to avoid double-hits
         self._bpm_min, self._bpm_max = 70.0, 180.0
-        self._unlock_pct = 0.12        # relative delta to start counting deviants
-        self._unlock_needed = 3        # beats beyond threshold needed to re-lock
+        self._unlock_pct = 0.20        # relative delta to start counting deviants - was 0.12, now much stricter (20% change needed)
+        self._unlock_needed = 5        # beats beyond threshold needed to re-lock - was 3, now require more evidence
         self._silence_reset_seconds = 1.6
 
         # Aubio onset/tempo
@@ -186,12 +186,11 @@ class AudioBeatDetector(threading.Thread):
         mid_raw = np.sum(mag[(freqs >= 150) & (freqs < 4000)])
         high_raw = np.sum(mag[(freqs >= 4000) & (freqs < 12000)])
         
-        # CRITICAL FIX: Much lighter normalization
-        # Goal: bass/high should be 0.5-3x RMS scale (not 0.01x!)
-        # Based on real-world testing: RMS=0.05-0.07, so bass/high should be similar
-        bass = bass_raw / (self.hop_size * 5)   # Changed from /100 to /5 (20x boost)
-        mid = mid_raw / (self.hop_size * 8)     # Mids are typically louder, so lighter scaling
-        high = high_raw / (self.hop_size * 3)   # Highs should be comparable to bass
+        # MORE AGGRESSIVE NORMALIZATION - target: bass/high ≈ 0.5-1.5x RMS
+        # Based on testing: RMS=0.05-0.07, bass should be similar (not 10x smaller)
+        bass = bass_raw / (self.hop_size * 2.5)   # Was /5, now /2.5 (another 2x boost)
+        mid = mid_raw / (self.hop_size * 8)       # Keep same - mids are naturally louder
+        high = high_raw / (self.hop_size * 2.5)   # Was /3, now /2.5 (closer to bass scale)
 
         # Smooth with exponential moving average
         self._bass_ema = 0.7 * self._bass_ema + 0.3 * bass

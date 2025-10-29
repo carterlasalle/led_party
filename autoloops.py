@@ -208,19 +208,19 @@ class AutoLoopsEngine:
 
         recent = list(self._fast_hist)[-16:]
         
-        # Buildup: energy rising over 8 beats (more lenient)
-        buildup = (recent[7] > recent[0] * 1.15)  # Was 1.3, now 1.15 (15% increase is enough)
+        # VERY LENIENT: Just need *any* rising energy
+        buildup = (recent[7] > recent[0] * 1.08)  # Was 1.15, now just 8% increase is enough
         
-        # Pre-drop: energy dip in last 2-4 beats
+        # Pre-drop: slight energy dip (very lenient)
         predrop = recent[-4:-1]
-        predrop_quiet = mean(predrop) < mean(recent[:-4]) * 0.7  # Was 0.6, now 0.7 (more lenient)
+        predrop_quiet = mean(predrop) < mean(recent[:-4]) * 0.85  # Was 0.7, now 0.85 (much more lenient)
         
-        # Drop: current beat is significantly louder
-        drop_spike = recent[-1] > mean(recent[:-1]) * 1.6  # Was 2.0, now 1.6 (60% spike is enough)
+        # Drop: noticeable spike (reduced threshold)
+        drop_spike = recent[-1] > mean(recent[:-1]) * 1.3  # Was 1.6, now 1.3 (30% spike is enough)
         
-        # Bass check (if bass data is available and meaningful)
-        if self._bass_hist_avg > 0.01:  # Only check if we have real bass data
-            bass_spike = self._bass_ema > self._bass_hist_avg * 2.0  # Was 2.5, now 2.0
+        # Bass check - very lenient
+        if self._bass_hist_avg > 0.005:  # Was 0.01, now half the threshold
+            bass_spike = self._bass_ema > self._bass_hist_avg * 1.5  # Was 2.0, now 1.5 (50% increase)
         else:
             bass_spike = True  # Skip bass check if values too small
         
@@ -369,10 +369,18 @@ class AutoLoopsEngine:
         # ---- END INTENSE DROP ----
 
         # phrase accent (but not during drops)
+        # CHEAT CODE: Force excitement at phrase boundaries during HIGH energy
         if phrase_boundary and not self._drop_detected:
             tier = self._energy_tier()
             if tier == EnergyTier.HIGH:
-                self.flash_white(250)  # LONGER on hype
+                # FORCE A MINI-DROP on phrase boundaries during high energy
+                # This guarantees hype moments even if sophisticated drop detection fails
+                self._enter_program(Program.RAINBOW_STROBE, beats=16, bpm=bpm, intensity=1.5)
+                self.flash_white(250)
+                self._cooldown_beats = 8  # Prevent spam
+                return  # Skip normal flow
+            elif tier == EnergyTier.MED:
+                self.flash_white(180)
             else:
                 self.flash_white(140)
 

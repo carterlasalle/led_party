@@ -1,0 +1,4 @@
+PyQt6==6.6.1
+bleak==0.22.2
+sounddevice==0.4.6
+numpy==1.26.4

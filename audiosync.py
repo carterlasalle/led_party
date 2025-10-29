@@ -181,10 +181,17 @@ class AudioBeatDetector(threading.Thread):
         mag = np.abs(fft)
         freqs = np.fft.rfftfreq(len(x), 1/self.sample_rate)
 
-        # Frequency bands
-        bass = np.sum(mag[(freqs >= 20) & (freqs < 150)])
-        mid = np.sum(mag[(freqs >= 150) & (freqs < 4000)])
-        high = np.sum(mag[(freqs >= 4000) & (freqs < 12000)])
+        # Frequency bands (sum of magnitudes)
+        bass_raw = np.sum(mag[(freqs >= 20) & (freqs < 150)])
+        mid_raw = np.sum(mag[(freqs >= 150) & (freqs < 4000)])
+        high_raw = np.sum(mag[(freqs >= 4000) & (freqs < 12000)])
+        
+        # CRITICAL: Normalize to RMS-like scale (0.0 - 1.0 range)
+        # FFT magnitudes are 100-10000x larger than RMS, so we normalize
+        # by dividing by hop_size and applying empirical scale factor
+        bass = bass_raw / (self.hop_size * 100)  # Scale factor tuned empirically
+        mid = mid_raw / (self.hop_size * 100)
+        high = high_raw / (self.hop_size * 100)
 
         # Smooth with exponential moving average
         self._bass_ema = 0.7 * self._bass_ema + 0.3 * bass

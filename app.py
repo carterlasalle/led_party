@@ -203,7 +203,9 @@ class MainWindow(QWidget):
         va.addWidget(self.cb_flash_on_beat)
         self.btn_audio_start = QPushButton("Start Audio Sync")
         self.btn_audio_stop = QPushButton("Stop Audio Sync")
+        self.btn_audio_debug = QPushButton("Audio Debug (5s)")
         va.addWidget(self.btn_audio_start); va.addWidget(self.btn_audio_stop)
+        va.addWidget(self.btn_audio_debug)
         right.addWidget(gb_audio)
 
         gb_auto = QGroupBox("Live Autoloops (SoundSwitch-style)")
@@ -241,6 +243,7 @@ class MainWindow(QWidget):
 
         self.btn_audio_start.clicked.connect(self.start_audio)
         self.btn_audio_stop.clicked.connect(self.stop_audio)
+        self.btn_audio_debug.clicked.connect(self.audio_debug)
 
         self.btn_auto_start.clicked.connect(self.start_autoloops)
         self.btn_auto_stop.clicked.connect(self.stop_autoloops)
@@ -428,6 +431,43 @@ class MainWindow(QWidget):
 
     def stop_autoloops(self):
         self.autoloops_enabled = False
+
+    def audio_debug(self):
+        """Print 5 seconds of raw audio stats for diagnostics"""
+        if not self.beat_detector:
+            QMessageBox.warning(self, "Error", "Start Audio Sync first!")
+            return
+        
+        print("\n" + "="*60)
+        print("AUDIO DEBUG - Watching for 5 seconds...")
+        print("="*60)
+        print("Expected values:")
+        print("  RMS: Silence=0.01-0.03, Music=0.05-0.15, Drops=0.20-0.40+")
+        print("  Bass/High: Should be similar scale to RMS (0.0-1.0)")
+        print("  BPM: Should lock within 5-10 beats")
+        print("-"*60)
+        
+        def debug_callback(ev):
+            beat_num = self.engine.state.beat if self.autoloops_enabled else "N/A"
+            print(f"Beat #{beat_num}: "
+                  f"RMS={ev.rms:.4f} Bass={ev.bass:.4f} High={ev.high:.4f} "
+                  f"BPM={ev.bpm:.1f}")
+        
+        # Temporarily wrap callback
+        old_callback = self.beat_detector.on_beat
+        def wrapped_callback(ev):
+            old_callback(ev)
+            debug_callback(ev)
+        
+        self.beat_detector.on_beat = wrapped_callback
+        
+        # Restore after 5 seconds
+        QtCore.QTimer.singleShot(5000, lambda: (
+            setattr(self.beat_detector, 'on_beat', old_callback),
+            print("="*60),
+            print("DEBUG COMPLETE - Check values above"),
+            print("="*60 + "\n")
+        ))
 
 def main():
     app = QApplication(sys.argv)

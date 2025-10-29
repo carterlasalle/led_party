@@ -4,6 +4,8 @@ from typing import List, Tuple, Dict, Optional
 from collections import deque
 from enum import Enum, auto
 import random
+import time
+from logger import DiagnosticLogger, LogEntry
 
 RGB = Tuple[int, int, int]
 
@@ -122,6 +124,9 @@ class AutoLoopsEngine:
         # user preset override
         self._preset_active: bool = False
         self._preset_name: Optional[str] = None
+
+        # diagnostic logging
+        self.logger = DiagnosticLogger(enabled=True)  # Set False to disable
 
     # ---- lifecycle ----
     def reset_music_context(self):
@@ -418,3 +423,24 @@ class AutoLoopsEngine:
             else:
                 # give ears a breather while keeping movement
                 self._enter_program(Program.SWAP_COLORS, beats=self.state.bar_len, bpm=bpm)
+
+        # ---- DIAGNOSTIC LOGGING ----
+        self.logger.log(LogEntry(
+            timestamp=time.time(),
+            beat_num=self.state.beat,
+            bpm=bpm,
+            rms=rms,
+            bass=bass,
+            mid=0.0,  # mid not currently used in detection, but logged for analysis
+            high=high,
+            ema_fast=self._ema_fast,
+            ema_med=self._ema_med,
+            ema_long=self._ema_long,
+            energy_tier=self._energy_tier().name,
+            program=self._program.name,
+            bar_pos=bar_pos,
+            phrase_boundary=phrase_boundary,
+            drop_detected=self._drop_detected,
+            build_detected=self._detect_build(),
+            breakdown_detected=self._detect_breakdown()
+        ))

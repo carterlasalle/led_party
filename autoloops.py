@@ -116,6 +116,7 @@ class AutoLoopsEngine:
         # program machine
         self._program: Program = Program.STATIC_COLOR
         self._prog_beats_left: int = 0
+        self._program_intensity: float = 1.0
         self._cooldown_beats: int = 0
 
         # user preset override
@@ -136,6 +137,7 @@ class AutoLoopsEngine:
         self._bass_hist_avg = 0.0
         self._program = Program.STATIC_COLOR
         self._prog_beats_left = 0
+        self._program_intensity = 1.0
         self._cooldown_beats = 0
         self._pal_index = 0
         self._in_predrop = False
@@ -244,6 +246,7 @@ class AutoLoopsEngine:
     def _enter_program(self, prg: Program, beats: int, bpm: float, color: Optional[RGB] = None, intensity: float = 1.0):
         self._program = prg
         self._prog_beats_left = max(1, beats)
+        self._program_intensity = intensity  # PRESERVE for reassertion
         if prg == Program.RAINBOW_STROBE:
             self.set_mode(MODE_STROBE_RAINBOW, speed_for_bpm(bpm, intensity))
         elif prg == Program.WHITE_STROBE:
@@ -376,10 +379,10 @@ class AutoLoopsEngine:
         if self._program == Program.BUILD_FLASH:
             self.flash_white(70)
         elif self._program == Program.RAINBOW_STROBE:
-            # Reassert with current intensity (default 1.0)
-            self.set_mode(MODE_STROBE_RAINBOW, speed_for_bpm(bpm, intensity=1.0))
+            # Reassert with PRESERVED intensity (maintains drop hype!)
+            self.set_mode(MODE_STROBE_RAINBOW, speed_for_bpm(bpm, self._program_intensity))
         elif self._program == Program.WHITE_STROBE:
-            self.set_mode(MODE_STROBE_WHITE, speed_for_bpm(bpm, intensity=1.0))
+            self.set_mode(MODE_STROBE_WHITE, speed_for_bpm(bpm, self._program_intensity))
         elif self._program == Program.SWAP_COLORS:
             if (self.state.beat % 2) == 0: self.set_rgb(*self.alt_color)
             else: self.set_rgb(*self.base_color)

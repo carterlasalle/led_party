@@ -18,6 +18,9 @@ class BeatEvent:
     timestamp: float
     bpm: float
     rms: float
+    bass: float = 0.0
+    mid: float = 0.0
+    high: float = 0.0
 
 def _median(xs: List[float]) -> float:
     a = sorted(xs)
@@ -55,6 +58,12 @@ class AudioBeatDetector(threading.Thread):
         # Energy
         self._rms_ema = 0.0
 
+        # Add spectral energy tracking (NEW)
+        self._fft_window = np.hanning(self.hop_size)
+        self._bass_ema = 0.0
+        self._mid_ema = 0.0
+        self._high_ema = 0.0
+
         # Config (tuneable)
         self._refractory = 0.18        # ignore re-triggers inside this (s)
         self._bpm_min, self._bpm_max = 70.0, 180.0
@@ -75,6 +84,10 @@ class AudioBeatDetector(threading.Thread):
         self._bpm_stable = 0.0
         self._deviation_beats = 0
         self._rms_ema = 0.0
+        # Reset spectral EMAs too
+        self._bass_ema = 0.0
+        self._mid_ema = 0.0
+        self._high_ema = 0.0
 
     # -------- Internals --------
     def _register_beat(self, t_now: float):
@@ -106,7 +119,14 @@ class AudioBeatDetector(threading.Thread):
             bpm_out = self._bpm_stable
 
         if self.on_beat:
-            self.on_beat(BeatEvent(timestamp=t_now, bpm=float(bpm_out), rms=float(self._rms_ema)))
+            self.on_beat(BeatEvent(
+                timestamp=t_now,
+                bpm=float(bpm_out),
+                rms=float(self._rms_ema),
+                bass=float(self._bass_ema),
+                mid=float(self._mid_ema),
+                high=float(self._high_ema)
+            ))
 
     def _estimate_bpm_pairwise(self) -> float:
         """
@@ -153,6 +173,26 @@ class AudioBeatDetector(threading.Thread):
             best *= 0.5
         return float(best)
 
+    def _analyze_spectrum(self, x: np.ndarray):
+        """Extract bass/mid/high energy for better detection"""
+        # Apply window to input chunk
+        windowed = x * self._fft_window
+        fft = np.fft.rfft(windowed)
+        mag = np.abs(fft)
+        freqs = np.fft.rfftfreq(len(x), 1/self.sample_rate)
+
+        # Frequency bands
+        bass = np.sum(mag[(freqs >= 20) & (freqs < 150)])
+        mid = np.sum(mag[(freqs >= 150) & (freqs < 4000)])
+        high = np.sum(mag[(freqs >= 4000) & (freqs < 12000)])
+
+        # Smooth with exponential moving average
+        self._bass_ema = 0.7 * self._bass_ema + 0.3 * bass
+        self._mid_ema = 0.7 * self._mid_ema + 0.3 * mid
+        self._high_ema = 0.7 * self._high_ema + 0.3 * high
+
+        return (self._bass_ema, self._mid_ema, self._high_ema)
+
     def run(self):
         self._running.set()
 
@@ -180,6 +220,9 @@ class AudioBeatDetector(threading.Thread):
                 # Energy tracking
                 rms = float(np.sqrt(np.mean(x * x)))
                 self._rms_ema = 0.85 * self._rms_ema + 0.15 * rms
+
+                # Spectral energy update (NEW)
+                self._analyze_spectrum(x)
 
                 # Beat detection
                 beat_now = False

@@ -218,6 +218,9 @@ class MainWindow(QWidget):
         self.btn_auto_start = QPushButton("Start Live Autoloops")
         self.btn_auto_stop = QPushButton("Stop Live Autoloops")
         vao.addWidget(self.btn_auto_start); vao.addWidget(self.btn_auto_stop)
+        # ADDED energy label
+        self.lbl_energy = QLabel("Energy: --")
+        vao.addWidget(self.lbl_energy)
         right.addWidget(gb_auto)
 
         right.addStretch(1)
@@ -376,8 +379,7 @@ class MainWindow(QWidget):
             QtCore.QMetaObject.invokeMethod(
                 self, "handle_beat",
                 QtCore.Qt.ConnectionType.QueuedConnection,
-                QtCore.Q_ARG(float, float(ev.bpm)),
-                QtCore.Q_ARG(float, float(ev.rms))
+                QtCore.Q_ARG(object, ev)
             )
 
         self.beat_detector = AudioBeatDetector(device_index=idx, on_beat=on_beat)
@@ -393,17 +395,31 @@ class MainWindow(QWidget):
             self.beat_detector = None
             self.lbl_bpm.setText("BPM: --")
 
-    @QtCore.pyqtSlot(float, float)
-    def handle_beat(self, bpm: float, rms: float):
-        if bpm > 0:
-            self.lbl_bpm.setText(f"BPM: {bpm:.1f}")
+    @QtCore.pyqtSlot(object)
+    def handle_beat(self, ev: BeatEvent):
+        if ev.bpm > 0:
+            self.lbl_bpm.setText(f"BPM: {ev.bpm:.1f}")
 
-        # EXACT flash on every beat (fixed duration), if enabled
+        # EXACT flash on every beat, adaptive duration/energy
         if self.cb_flash_on_beat.isChecked():
-            self._flash_white_ms(70)
+            if self.autoloops_enabled and hasattr(self.engine, '_energy_tier'):
+                tier = self.engine._energy_tier()
+                from autoloops import EnergyTier  # To ensure enum is available
+                if tier == EnergyTier.HIGH:
+                    self._flash_white_ms(150)  # Longer, punchier on drops
+                elif tier == EnergyTier.MED:
+                    self._flash_white_ms(90)
+                else:
+                    self._flash_white_ms(50)
+            else:
+                self._flash_white_ms(90)
 
         if self.autoloops_enabled:
-            self.engine.on_beat(bpm, rms)
+            # Show energy label (require _energy_tier on engine)
+            if hasattr(self.engine, '_energy_tier'):
+                tier = self.engine._energy_tier()
+                self.lbl_energy.setText(f"Energy: {tier.name} (RMS: {ev.rms:.3f})")
+            self.engine.on_beat(ev.bpm, ev.rms, ev.high, ev.bass)
 
     def start_autoloops(self):
         self.engine.set_style(self.combo_style.currentText())

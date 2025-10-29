@@ -8,6 +8,8 @@ Adds a **SoundSwitch‑style Live Autoloops engine** on top of the earlier build
 - 4‑beat bars, 8‑bar phrases (32 beats) with big accents on phrase changes
 - **Spectral analysis**: Bass/mid/high frequency tracking for drop/build detection
 - **Energy-adaptive effects**: Detects drops, builds, breakdowns with dynamic intensity
+- **Color flash on beat**: Flash custom colors OR cycle through rainbow on every beat
+- **Live color wheel**: Real-time interactive color control with instant updates
 - **Diagnostic logging**: CSV beat-by-beat logs for tuning and debugging
 - Still supports manual control, presets, brightness, vendor modes, blackout, white flash
 

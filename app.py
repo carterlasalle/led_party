@@ -95,6 +95,25 @@ class MainWindow(QWidget):
         self.beat_detector: Optional[AudioBeatDetector] = None
         self.last_color = (255, 255, 255)
         self.alt_color = (12, 36, 150)
+        
+        # color flash on beat
+        self.flash_color = (255, 255, 255)  # Default to white
+        self.flash_color_index = 0  # Index for rotating through color wheel
+        # Rainbow color wheel (HSV-based colors for smooth transitions)
+        self.flash_color_wheel = [
+            (255, 0, 0),      # Red
+            (255, 127, 0),    # Orange
+            (255, 255, 0),    # Yellow
+            (0, 255, 0),      # Green
+            (0, 255, 255),    # Cyan
+            (0, 0, 255),      # Blue
+            (127, 0, 255),    # Purple
+            (255, 0, 255),    # Magenta
+        ]
+        
+        # live color wheel
+        self.live_wheel_active = False
+        self.live_wheel_dialog: Optional[QColorDialog] = None
 
         # autoloops
         self.autoloops_enabled = False
@@ -225,6 +244,45 @@ class MainWindow(QWidget):
         vao.addWidget(self.lbl_energy)
         right.addWidget(gb_auto)
 
+        # Color Flash on Beat panel
+        gb_color_flash = QGroupBox("Color Flash on Beat")
+        vcf = QVBoxLayout(gb_color_flash)
+        
+        # Color cycling options
+        hcf_mode = QHBoxLayout()
+        self.rb_flash_static = QRadioButton("Static Color")
+        self.rb_flash_cycle = QRadioButton("Cycle Colors (Rainbow)")
+        self.rb_flash_static.setChecked(True)
+        self.flash_mode_group = QButtonGroup(self)
+        self.flash_mode_group.addButton(self.rb_flash_static)
+        self.flash_mode_group.addButton(self.rb_flash_cycle)
+        hcf_mode.addWidget(self.rb_flash_static)
+        hcf_mode.addWidget(self.rb_flash_cycle)
+        vcf.addLayout(hcf_mode)
+        
+        self.cb_color_flash_enabled = QCheckBox("Enable Flash on Beat")
+        vcf.addWidget(self.cb_color_flash_enabled)
+        
+        hcf = QHBoxLayout()
+        self.btn_flash_color_pick = QPushButton("Pick Static Color")
+        self.lbl_flash_color = QLabel("● Flash: White")
+        self.lbl_flash_color.setStyleSheet("font-weight: bold; font-size: 14px;")
+        hcf.addWidget(self.btn_flash_color_pick)
+        hcf.addWidget(self.lbl_flash_color)
+        vcf.addLayout(hcf)
+        right.addWidget(gb_color_flash)
+
+        # Live Color Wheel panel
+        gb_live_wheel = QGroupBox("Live Color Wheel")
+        vlw = QVBoxLayout(gb_live_wheel)
+        self.cb_live_wheel_enabled = QCheckBox("Enable Live Color Wheel")
+        vlw.addWidget(self.cb_live_wheel_enabled)
+        self.btn_live_color_pick = QPushButton("Open Color Wheel (updates live!)")
+        vlw.addWidget(self.btn_live_color_pick)
+        self.lbl_live_color = QLabel("Current: Not active")
+        vlw.addWidget(self.lbl_live_color)
+        right.addWidget(gb_live_wheel)
+
         right.addStretch(1)
 
     def _wire(self):
@@ -250,11 +308,79 @@ class MainWindow(QWidget):
         self.combo_style.currentTextChanged.connect(lambda s: self.engine.set_style(s))
         self.combo_palette.currentTextChanged.connect(lambda p: self.engine.set_palette(p))
 
+        self.btn_flash_color_pick.clicked.connect(self.pick_flash_color)
+        self.btn_live_color_pick.clicked.connect(self.open_live_color_wheel)
+        self.cb_live_wheel_enabled.stateChanged.connect(self.toggle_live_wheel)
+
     def open_color_picker(self):
         initial = QtGui.QColor(*self.last_color)
         color = QColorDialog.getColor(initial, self, "Pick Color")
         if color.isValid():
             self.set_color((color.red(), color.green(), color.blue()))
+
+    def pick_flash_color(self):
+        """Pick the color for beat-synced color flashes"""
+        initial = QtGui.QColor(*self.flash_color)
+        color = QColorDialog.getColor(initial, self, "Pick Flash Color")
+        if color.isValid():
+            self.flash_color = (color.red(), color.green(), color.blue())
+            self.lbl_flash_color.setText(f"● Flash: RGB({color.red()},{color.green()},{color.blue()})")
+            self.lbl_flash_color.setStyleSheet(
+                f"font-weight: bold; font-size: 14px; color: rgb({color.red()},{color.green()},{color.blue()});"
+            )
+
+    def open_live_color_wheel(self):
+        """Open a persistent color wheel that updates lights in real-time"""
+        if self.live_wheel_dialog is not None and self.live_wheel_dialog.isVisible():
+            # Already open, just bring to front
+            self.live_wheel_dialog.raise_()
+            self.live_wheel_dialog.activateWindow()
+            return
+
+        initial = QtGui.QColor(*self.last_color)
+        self.live_wheel_dialog = QColorDialog(initial, self)
+        self.live_wheel_dialog.setWindowTitle("Live Color Wheel")
+        self.live_wheel_dialog.setOption(QColorDialog.ColorDialogOption.NoButtons)  # No OK/Cancel
+        
+        # Update lights in real-time as user changes color
+        self.live_wheel_dialog.currentColorChanged.connect(self.on_live_color_change)
+        
+        # When closed, clean up
+        self.live_wheel_dialog.finished.connect(self.on_live_wheel_closed)
+        
+        self.live_wheel_dialog.show()
+
+    def on_live_color_change(self, color: QtGui.QColor):
+        """Called continuously as user drags in color wheel"""
+        if self.cb_live_wheel_enabled.isChecked():
+            rgb = (color.red(), color.green(), color.blue())
+            self._set_rgb_targets(*rgb)
+            self.lbl_live_color.setText(f"Current: RGB({color.red()},{color.green()},{color.blue()})")
+            self.lbl_live_color.setStyleSheet(
+                f"color: rgb({color.red()},{color.green()},{color.blue()}); font-weight: bold;"
+            )
+            # Update last_color so it persists
+            self.last_color = rgb
+            self.engine.base_color = rgb
+
+    def on_live_wheel_closed(self):
+        """Clean up when live color wheel is closed"""
+        self.live_wheel_dialog = None
+        if not self.cb_live_wheel_enabled.isChecked():
+            self.lbl_live_color.setText("Current: Not active")
+            self.lbl_live_color.setStyleSheet("")
+
+    def toggle_live_wheel(self, state):
+        """Enable/disable live color wheel updates"""
+        if state == 0:  # Unchecked
+            self.live_wheel_active = False
+            self.lbl_live_color.setText("Current: Not active")
+            self.lbl_live_color.setStyleSheet("")
+        else:  # Checked
+            self.live_wheel_active = True
+            if self.live_wheel_dialog is None or not self.live_wheel_dialog.isVisible():
+                # Auto-open the dialog when enabled
+                self.open_live_color_wheel()
 
     # ---------- BLE helpers ----------
     def current_targets(self) -> List[ble.LightHandle]:
@@ -292,6 +418,11 @@ class MainWindow(QWidget):
 
     def _flash_white_ms(self, ms:int):
         self._set_rgb_targets(255,255,255)
+        QtCore.QTimer.singleShot(ms, lambda: self._set_rgb_targets(*self.last_color))
+
+    def _flash_color_ms(self, rgb: tuple, ms: int):
+        """Flash a specific color for specified duration, then return to last color"""
+        self._set_rgb_targets(*rgb)
         QtCore.QTimer.singleShot(ms, lambda: self._set_rgb_targets(*self.last_color))
 
     # ---------- Discovery ----------
@@ -404,18 +535,36 @@ class MainWindow(QWidget):
             self.lbl_bpm.setText(f"BPM: {ev.bpm:.1f}")
 
         # EXACT flash on every beat, adaptive duration/energy
-        if self.cb_flash_on_beat.isChecked():
+        if self.cb_flash_on_beat.isChecked() or self.cb_color_flash_enabled.isChecked():
+            # Choose flash color based on mode
+            if self.cb_color_flash_enabled.isChecked():
+                if self.rb_flash_cycle.isChecked():
+                    # Cycle through rainbow color wheel
+                    flash_rgb = self.flash_color_wheel[self.flash_color_index]
+                    self.flash_color_index = (self.flash_color_index + 1) % len(self.flash_color_wheel)
+                    # Update label to show current color
+                    r, g, b = flash_rgb
+                    self.lbl_flash_color.setText(f"● Cycling: RGB({r},{g},{b})")
+                    self.lbl_flash_color.setStyleSheet(
+                        f"font-weight: bold; font-size: 14px; color: rgb({r},{g},{b});"
+                    )
+                else:
+                    # Use static picked color
+                    flash_rgb = self.flash_color
+            else:
+                flash_rgb = (255, 255, 255)  # White (original flash on beat)
+            
             if self.autoloops_enabled and hasattr(self.engine, '_energy_tier'):
                 tier = self.engine._energy_tier()
                 from autoloops import EnergyTier  # To ensure enum is available
                 if tier == EnergyTier.HIGH:
-                    self._flash_white_ms(150)  # Longer, punchier on drops
+                    self._flash_color_ms(flash_rgb, 150)  # Longer, punchier on drops
                 elif tier == EnergyTier.MED:
-                    self._flash_white_ms(90)
+                    self._flash_color_ms(flash_rgb, 90)
                 else:
-                    self._flash_white_ms(50)
+                    self._flash_color_ms(flash_rgb, 50)
             else:
-                self._flash_white_ms(90)
+                self._flash_color_ms(flash_rgb, 90)
 
         if self.autoloops_enabled:
             # Show energy label (require _energy_tier on engine)

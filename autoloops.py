@@ -192,9 +192,12 @@ class AutoLoopsEngine:
 
     def _energy_tier(self) -> EnergyTier:
         ratio = (self._ema_fast + 1e-6) / (self._ema_med + 1e-6)
-        if self._ema_fast < 0.07 or ratio < 0.85:
+        
+        # FIXED THRESHOLDS - tuned for real-world audio levels
+        # Based on testing: ema_fast ranges 0.03-0.07, so thresholds must fit this range!
+        if self._ema_fast < 0.045 or ratio < 0.90:    # Was: 0.07 / 0.85 (too high)
             return EnergyTier.LOW
-        if self._ema_fast > 0.14 or ratio > 1.25:
+        if self._ema_fast > 0.065 or ratio > 1.15:    # Was: 0.14 / 1.25 (unreachable)
             return EnergyTier.HIGH
         return EnergyTier.MED
 
@@ -204,16 +207,23 @@ class AutoLoopsEngine:
             return False
 
         recent = list(self._fast_hist)[-16:]
-        first_half = recent[:8]
-        buildup = (recent[7] > recent[0] * 1.3)  # 30% increase over 8 beats
-
+        
+        # Buildup: energy rising over 8 beats (more lenient)
+        buildup = (recent[7] > recent[0] * 1.15)  # Was 1.3, now 1.15 (15% increase is enough)
+        
+        # Pre-drop: energy dip in last 2-4 beats
         predrop = recent[-4:-1]
-        predrop_quiet = mean(predrop) < mean(recent[:-4]) * 0.6
-
-        drop_spike = recent[-1] > mean(recent[:-1]) * 2.0
-
-        bass_spike = self._bass_ema > self._bass_hist_avg * 2.5 if hasattr(self, '_bass_ema') and self._bass_hist_avg > 0 else True
-
+        predrop_quiet = mean(predrop) < mean(recent[:-4]) * 0.7  # Was 0.6, now 0.7 (more lenient)
+        
+        # Drop: current beat is significantly louder
+        drop_spike = recent[-1] > mean(recent[:-1]) * 1.6  # Was 2.0, now 1.6 (60% spike is enough)
+        
+        # Bass check (if bass data is available and meaningful)
+        if self._bass_hist_avg > 0.01:  # Only check if we have real bass data
+            bass_spike = self._bass_ema > self._bass_hist_avg * 2.0  # Was 2.5, now 2.0
+        else:
+            bass_spike = True  # Skip bass check if values too small
+        
         return buildup and predrop_quiet and drop_spike and bass_spike
 
     def _detect_build(self) -> bool:
@@ -223,11 +233,15 @@ class AutoLoopsEngine:
 
         recent = list(self._fast_hist)[-12:]
         slope = (recent[-1] - recent[0]) / 11
-        rising = slope > 0.01 and recent[-1] > recent[0] * 1.2
+        rising = slope > 0.005 and recent[-1] > recent[0] * 1.15  # Was 0.01/1.2, now more sensitive
 
-        high_rising = self._high_ema > self._high_hist_avg * 1.4 if hasattr(self, '_high_ema') and self._high_hist_avg > 0 else False
+        # High check only if we have meaningful high data
+        if self._high_hist_avg > 0.01:
+            high_rising = self._high_ema > self._high_hist_avg * 1.3  # Was 1.4, now 1.3
+        else:
+            high_rising = True  # Skip check if values too small
 
-        return rising and high_rising and self._ema_fast > 0.10
+        return rising and high_rising and self._ema_fast > 0.055  # Was 0.10, now 0.055 (much more attainable)
 
     def _bpm_trending_up(self) -> bool:
         # No longer used for builds! Retained for fallback or legacy, but not build detection.

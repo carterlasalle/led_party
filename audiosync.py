@@ -186,12 +186,12 @@ class AudioBeatDetector(threading.Thread):
         mid_raw = np.sum(mag[(freqs >= 150) & (freqs < 4000)])
         high_raw = np.sum(mag[(freqs >= 4000) & (freqs < 12000)])
         
-        # CRITICAL: Normalize to RMS-like scale (0.0 - 1.0 range)
-        # FFT magnitudes are 100-10000x larger than RMS, so we normalize
-        # by dividing by hop_size and applying empirical scale factor
-        bass = bass_raw / (self.hop_size * 100)  # Scale factor tuned empirically
-        mid = mid_raw / (self.hop_size * 100)
-        high = high_raw / (self.hop_size * 100)
+        # CRITICAL FIX: Much lighter normalization
+        # Goal: bass/high should be 0.5-3x RMS scale (not 0.01x!)
+        # Based on real-world testing: RMS=0.05-0.07, so bass/high should be similar
+        bass = bass_raw / (self.hop_size * 5)   # Changed from /100 to /5 (20x boost)
+        mid = mid_raw / (self.hop_size * 8)     # Mids are typically louder, so lighter scaling
+        high = high_raw / (self.hop_size * 3)   # Highs should be comparable to bass
 
         # Smooth with exponential moving average
         self._bass_ema = 0.7 * self._bass_ema + 0.3 * bass

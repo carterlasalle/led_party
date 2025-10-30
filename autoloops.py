@@ -128,6 +128,9 @@ class AutoLoopsEngine:
         # diagnostic logging
         self.logger = DiagnosticLogger(enabled=True)  # Set False to disable
 
+        # sensitivity scaling (set by UI)
+        self._sensitivity_scale = 1.0
+
     # ---- lifecycle ----
     def reset_music_context(self):
         self.state = GridState()
@@ -195,9 +198,14 @@ class AutoLoopsEngine:
         
         # FIXED THRESHOLDS - tuned for real-world audio levels
         # Based on testing: ema_fast ranges 0.03-0.07, so thresholds must fit this range!
-        if self._ema_fast < 0.045 or ratio < 0.90:    # Was: 0.07 / 0.85 (too high)
+        # Apply sensitivity scaling (higher sensitivity = easier to reach MED/HIGH)
+        scale = self._sensitivity_scale
+        low_threshold = 0.045 / scale
+        high_threshold = 0.065 / scale
+        
+        if self._ema_fast < low_threshold or ratio < 0.90:
             return EnergyTier.LOW
-        if self._ema_fast > 0.065 or ratio > 1.15:    # Was: 0.14 / 1.25 (unreachable)
+        if self._ema_fast > high_threshold or ratio > 1.15:
             return EnergyTier.HIGH
         return EnergyTier.MED
 

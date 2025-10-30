@@ -8,7 +8,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QPushButton, QLabel, QComboBox, QSlider, QColorDialog,
     QGridLayout, QHBoxLayout, QVBoxLayout, QGroupBox, QRadioButton, QButtonGroup,
-    QMessageBox, QCheckBox
+    QMessageBox, QCheckBox, QScrollArea
 )
 
 import ble_control as ble
@@ -115,6 +115,16 @@ class MainWindow(QWidget):
         self.live_wheel_active = False
         self.live_wheel_dialog: Optional[QColorDialog] = None
 
+        # manual control
+        self.manual_mode = False
+        self.manual_energy_tier = None
+        self.sensitivity_multiplier = 1.0
+
+        # alternating effects
+        self.alternating_enabled = False
+        self.alternating_timer = QtCore.QTimer()
+        self.alternating_state = 0  # 0 or 1 for A/B switching
+
         # autoloops
         self.autoloops_enabled = False
         self.engine = AutoLoopsEngine(
@@ -189,8 +199,16 @@ class MainWindow(QWidget):
         vcol.addLayout(hb2)
         left.addWidget(gb_color)
 
-        # Right: modes + audio + autoloops
-        right = QVBoxLayout(); root.addLayout(right,1)
+        # Right: modes + audio + autoloops (in a scroll area for overflow)
+        right_scroll = QScrollArea()
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        right_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        
+        right_widget = QWidget()
+        right = QVBoxLayout(right_widget)
+        right_scroll.setWidget(right_widget)
+        root.addWidget(right_scroll, 1)
 
         gb_modes = QGroupBox("Vendor Modes")
         vm = QVBoxLayout(gb_modes)
@@ -283,7 +301,93 @@ class MainWindow(QWidget):
         vlw.addWidget(self.lbl_live_color)
         right.addWidget(gb_live_wheel)
 
-        right.addStretch(1)
+        # Manual Control & Sensitivity panel
+        gb_manual = QGroupBox("Manual Control & Sensitivity")
+        vman = QVBoxLayout(gb_manual)
+        
+        # Mode toggle
+        hmode = QHBoxLayout()
+        self.rb_auto_mode = QRadioButton("Automatic")
+        self.rb_manual_mode = QRadioButton("Manual Override")
+        self.rb_auto_mode.setChecked(True)
+        self.mode_group = QButtonGroup(self)
+        self.mode_group.addButton(self.rb_auto_mode)
+        self.mode_group.addButton(self.rb_manual_mode)
+        hmode.addWidget(self.rb_auto_mode)
+        hmode.addWidget(self.rb_manual_mode)
+        vman.addLayout(hmode)
+        
+        # Manual energy tier buttons
+        self.lbl_manual_energy = QLabel("Manual Energy Tier:")
+        vman.addWidget(self.lbl_manual_energy)
+        hme = QHBoxLayout()
+        self.btn_manual_low = QPushButton("LOW")
+        self.btn_manual_med = QPushButton("MED")
+        self.btn_manual_high = QPushButton("HIGH")
+        self.btn_manual_low.setEnabled(False)
+        self.btn_manual_med.setEnabled(False)
+        self.btn_manual_high.setEnabled(False)
+        hme.addWidget(self.btn_manual_low)
+        hme.addWidget(self.btn_manual_med)
+        hme.addWidget(self.btn_manual_high)
+        vman.addLayout(hme)
+        
+        # Manual trigger buttons
+        self.lbl_manual_triggers = QLabel("Manual Triggers:")
+        vman.addWidget(self.lbl_manual_triggers)
+        hmt = QHBoxLayout()
+        self.btn_trigger_build = QPushButton("Trigger Build")
+        self.btn_trigger_drop = QPushButton("Trigger Drop")
+        hmt.addWidget(self.btn_trigger_build)
+        hmt.addWidget(self.btn_trigger_drop)
+        vman.addLayout(hmt)
+        
+        # Sensitivity slider
+        self.lbl_sensitivity = QLabel("Sensitivity: 1.0x (Normal)")
+        vman.addWidget(self.lbl_sensitivity)
+        self.s_sensitivity = QSlider(Qt.Orientation.Horizontal)
+        self.s_sensitivity.setRange(50, 200)  # 0.5x to 2.0x
+        self.s_sensitivity.setValue(100)  # 1.0x default
+        vman.addWidget(self.s_sensitivity)
+        
+        right.addWidget(gb_manual)
+
+        # Alternating Light Effects panel
+        gb_alt = QGroupBox("Alternating Light Effects (A/B)")
+        valt = QVBoxLayout(gb_alt)
+        
+        self.cb_alternating = QCheckBox("Enable Alternating Mode")
+        valt.addWidget(self.cb_alternating)
+        
+        hap = QHBoxLayout()
+        hap.addWidget(QLabel("Pattern:"))
+        self.combo_alt_pattern = QComboBox()
+        self.combo_alt_pattern.addItems([
+            "Alternating Flash",
+            "Alternating On/Off",
+            "Alternating Colors",
+            "Chase (A→B→A→B)",
+            "Opposite Colors"
+        ])
+        hap.addWidget(self.combo_alt_pattern)
+        valt.addLayout(hap)
+        
+        has = QHBoxLayout()
+        has.addWidget(QLabel("Speed:"))
+        self.s_alt_speed = QSlider(Qt.Orientation.Horizontal)
+        self.s_alt_speed.setRange(10, 200)  # 100ms to 2000ms
+        self.s_alt_speed.setValue(50)  # 500ms default
+        has.addWidget(self.s_alt_speed)
+        self.lbl_alt_speed = QLabel("500ms")
+        has.addWidget(self.lbl_alt_speed)
+        valt.addLayout(has)
+        
+        right.addWidget(gb_alt)
+
+        right.addStretch(1)  # Push everything to top
+        
+        # Set minimum width for right column to prevent squishing
+        right_widget.setMinimumWidth(400)
 
     def _wire(self):
         self.btn_scan.clicked.connect(self.scan_devices)
@@ -312,6 +416,18 @@ class MainWindow(QWidget):
         self.btn_live_color_pick.clicked.connect(self.open_live_color_wheel)
         self.cb_live_wheel_enabled.stateChanged.connect(self.toggle_live_wheel)
 
+        self.rb_auto_mode.toggled.connect(self.toggle_manual_mode)
+        self.btn_manual_low.clicked.connect(lambda: self.set_manual_energy("LOW"))
+        self.btn_manual_med.clicked.connect(lambda: self.set_manual_energy("MED"))
+        self.btn_manual_high.clicked.connect(lambda: self.set_manual_energy("HIGH"))
+        self.btn_trigger_build.clicked.connect(self.trigger_build_manually)
+        self.btn_trigger_drop.clicked.connect(self.trigger_drop_manually)
+        self.s_sensitivity.valueChanged.connect(self.update_sensitivity)
+
+        self.cb_alternating.stateChanged.connect(self.toggle_alternating)
+        self.s_alt_speed.valueChanged.connect(self.update_alt_speed)
+        self.alternating_timer.timeout.connect(self.run_alternating_pattern)
+
     def open_color_picker(self):
         initial = QtGui.QColor(*self.last_color)
         color = QColorDialog.getColor(initial, self, "Pick Color")
@@ -331,12 +447,22 @@ class MainWindow(QWidget):
 
     def open_live_color_wheel(self):
         """Open a persistent color wheel that updates lights in real-time"""
-        if self.live_wheel_dialog is not None and self.live_wheel_dialog.isVisible():
-            # Already open, just bring to front
-            self.live_wheel_dialog.raise_()
-            self.live_wheel_dialog.activateWindow()
-            return
+        # If dialog exists and is visible, bring to front
+        if self.live_wheel_dialog is not None:
+            if self.live_wheel_dialog.isVisible():
+                self.live_wheel_dialog.raise_()
+                self.live_wheel_dialog.activateWindow()
+                return
+            else:
+                # Dialog exists but not visible - clean it up and recreate
+                try:
+                    self.live_wheel_dialog.close()
+                    self.live_wheel_dialog.deleteLater()
+                except Exception:
+                    pass
+                self.live_wheel_dialog = None
 
+        # Create new dialog
         initial = QtGui.QColor(*self.last_color)
         self.live_wheel_dialog = QColorDialog(initial, self)
         self.live_wheel_dialog.setWindowTitle("Live Color Wheel")
@@ -348,6 +474,11 @@ class MainWindow(QWidget):
         # When closed, clean up
         self.live_wheel_dialog.finished.connect(self.on_live_wheel_closed)
         
+        # Show as a separate window (not modal)
+        self.live_wheel_dialog.setWindowFlags(
+            Qt.WindowType.Window | 
+            Qt.WindowType.WindowStaysOnTopHint
+        )
         self.live_wheel_dialog.show()
 
     def on_live_color_change(self, color: QtGui.QColor):
@@ -365,7 +496,18 @@ class MainWindow(QWidget):
 
     def on_live_wheel_closed(self):
         """Clean up when live color wheel is closed"""
+        # Properly disconnect and clean up
+        if self.live_wheel_dialog is not None:
+            try:
+                self.live_wheel_dialog.currentColorChanged.disconnect()
+            except Exception:
+                pass
+            try:
+                self.live_wheel_dialog.deleteLater()
+            except Exception:
+                pass
         self.live_wheel_dialog = None
+        
         if not self.cb_live_wheel_enabled.isChecked():
             self.lbl_live_color.setText("Current: Not active")
             self.lbl_live_color.setStyleSheet("")
@@ -376,11 +518,13 @@ class MainWindow(QWidget):
             self.live_wheel_active = False
             self.lbl_live_color.setText("Current: Not active")
             self.lbl_live_color.setStyleSheet("")
+            # Close dialog if open
+            if self.live_wheel_dialog is not None and self.live_wheel_dialog.isVisible():
+                self.live_wheel_dialog.close()
         else:  # Checked
             self.live_wheel_active = True
-            if self.live_wheel_dialog is None or not self.live_wheel_dialog.isVisible():
-                # Auto-open the dialog when enabled
-                self.open_live_color_wheel()
+            # Always try to open when enabled
+            self.open_live_color_wheel()
 
     # ---------- BLE helpers ----------
     def current_targets(self) -> List[ble.LightHandle]:
@@ -570,7 +714,19 @@ class MainWindow(QWidget):
             # Show energy label (require _energy_tier on engine)
             if hasattr(self.engine, '_energy_tier'):
                 tier = self.engine._energy_tier()
+                
+                # Apply sensitivity multiplier to thresholds
+                if self.sensitivity_multiplier != 1.0:
+                    self.engine._sensitivity_scale = self.sensitivity_multiplier
+                
+                # Apply manual energy override if active
+                if self.manual_mode and self.manual_energy_tier:
+                    from autoloops import EnergyTier
+                    tier_map = {"LOW": EnergyTier.LOW, "MED": EnergyTier.MED, "HIGH": EnergyTier.HIGH}
+                    tier = tier_map[self.manual_energy_tier]
+                
                 self.lbl_energy.setText(f"Energy: {tier.name} (RMS: {ev.rms:.3f})")
+            
             self.engine.on_beat(ev.bpm, ev.rms, ev.high, ev.bass)
 
     def start_autoloops(self):
@@ -580,6 +736,139 @@ class MainWindow(QWidget):
 
     def stop_autoloops(self):
         self.autoloops_enabled = False
+
+    # ---------- Manual Control ----------
+    def toggle_manual_mode(self, checked):
+        """Toggle between automatic and manual mode"""
+        self.manual_mode = not checked  # auto_mode toggled, so manual is opposite
+        
+        # Enable/disable manual buttons
+        self.btn_manual_low.setEnabled(self.manual_mode)
+        self.btn_manual_med.setEnabled(self.manual_mode)
+        self.btn_manual_high.setEnabled(self.manual_mode)
+        
+        if not self.manual_mode:
+            self.manual_energy_tier = None
+
+    def set_manual_energy(self, tier: str):
+        """Set manual energy tier override"""
+        self.manual_energy_tier = tier
+        self.lbl_manual_energy.setText(f"Manual Energy Tier: {tier}")
+        
+        # Apply immediately to autoloops if active
+        if self.autoloops_enabled:
+            from autoloops import EnergyTier
+            tier_map = {"LOW": EnergyTier.LOW, "MED": EnergyTier.MED, "HIGH": EnergyTier.HIGH}
+            # Force the engine to use this tier (we'll modify handle_beat to check this)
+
+    def trigger_build_manually(self):
+        """Manually trigger a build sequence"""
+        if self.autoloops_enabled:
+            # Enter BUILD_FLASH program for 2 bars
+            self.engine._enter_program(
+                self.engine._program.__class__.BUILD_FLASH,
+                beats=self.engine.state.bar_len * 2,
+                bpm=120  # Default BPM
+            )
+
+    def trigger_drop_manually(self):
+        """Manually trigger a drop sequence"""
+        if self.autoloops_enabled:
+            from autoloops import Program
+            # Force drop sequence: blackout → rainbow strobe
+            self.engine._drop_detected = True
+            self.engine._drop_countdown = 2
+
+    def update_sensitivity(self, value):
+        """Update sensitivity multiplier for energy detection"""
+        self.sensitivity_multiplier = value / 100.0  # 50-200 → 0.5-2.0
+        self.lbl_sensitivity.setText(f"Sensitivity: {self.sensitivity_multiplier:.1f}x")
+
+    # ---------- Alternating Effects ----------
+    def toggle_alternating(self, state):
+        """Enable/disable alternating light effects"""
+        self.alternating_enabled = (state != 0)
+        
+        if self.alternating_enabled:
+            # Start timer
+            speed_ms = self.s_alt_speed.value() * 10  # slider 10-200 → 100-2000ms
+            self.alternating_timer.start(speed_ms)
+        else:
+            self.alternating_timer.stop()
+
+    def update_alt_speed(self, value):
+        """Update alternating pattern speed"""
+        speed_ms = value * 10  # 10-200 → 100-2000ms
+        self.lbl_alt_speed.setText(f"{speed_ms}ms")
+        if self.alternating_enabled:
+            self.alternating_timer.setInterval(speed_ms)
+
+    def run_alternating_pattern(self):
+        """Execute alternating pattern based on selected mode"""
+        if not self.lightA or not self.lightB:
+            return  # Need both lights for alternating
+        
+        pattern = self.combo_alt_pattern.currentText()
+        self.alternating_state = (self.alternating_state + 1) % 2
+        
+        if pattern == "Alternating Flash":
+            # Flash A, then B, then A, etc.
+            if self.alternating_state == 0:
+                self._set_rgb_single(self.lightA, *self.last_color)
+                self._set_rgb_single(self.lightB, 0, 0, 0)
+            else:
+                self._set_rgb_single(self.lightA, 0, 0, 0)
+                self._set_rgb_single(self.lightB, *self.last_color)
+        
+        elif pattern == "Alternating On/Off":
+            # One on, one off, swap
+            if self.alternating_state == 0:
+                self._set_rgb_single(self.lightA, *self.last_color)
+                self._set_rgb_single(self.lightB, 0, 0, 0)
+            else:
+                self._set_rgb_single(self.lightA, 0, 0, 0)
+                self._set_rgb_single(self.lightB, *self.last_color)
+        
+        elif pattern == "Alternating Colors":
+            # A gets primary color, B gets alt color
+            if self.alternating_state == 0:
+                self._set_rgb_single(self.lightA, *self.last_color)
+                self._set_rgb_single(self.lightB, *self.alt_color)
+            else:
+                self._set_rgb_single(self.lightA, *self.alt_color)
+                self._set_rgb_single(self.lightB, *self.last_color)
+        
+        elif pattern == "Chase (A→B→A→B)":
+            # Quick flash chase effect
+            if self.alternating_state == 0:
+                self._set_rgb_single(self.lightA, 255, 255, 255)
+                QtCore.QTimer.singleShot(50, lambda: self._set_rgb_single(self.lightA, *self.last_color))
+            else:
+                self._set_rgb_single(self.lightB, 255, 255, 255)
+                QtCore.QTimer.singleShot(50, lambda: self._set_rgb_single(self.lightB, *self.last_color))
+        
+        elif pattern == "Opposite Colors":
+            # Complementary colors
+            r, g, b = self.last_color
+            comp_r, comp_g, comp_b = (255 - r, 255 - g, 255 - b)
+            if self.alternating_state == 0:
+                self._set_rgb_single(self.lightA, r, g, b)
+                self._set_rgb_single(self.lightB, comp_r, comp_g, comp_b)
+            else:
+                self._set_rgb_single(self.lightA, comp_r, comp_g, comp_b)
+                self._set_rgb_single(self.lightB, r, g, b)
+
+    def _set_rgb_single(self, handle: ble.LightHandle, r: int, g: int, b: int):
+        """Set RGB for a single light (used by alternating effects)"""
+        bscale = self.s_brightness.value() / 100.0
+        r = int(r * bscale); g = int(g * bscale); b = int(b * bscale)
+        serialized = [handle.__dict__]
+        QtCore.QMetaObject.invokeMethod(
+            self.ble_worker, "set_rgb_multi",
+            QtCore.Qt.ConnectionType.QueuedConnection,
+            QtCore.Q_ARG(list, serialized),
+            QtCore.Q_ARG(int, r), QtCore.Q_ARG(int, g), QtCore.Q_ARG(int, b), QtCore.Q_ARG(int, 0)
+        )
 
     def audio_debug(self):
         """Print 5 seconds of raw audio stats for diagnostics"""

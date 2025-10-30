@@ -10,6 +10,8 @@ Adds a **SoundSwitch‑style Live Autoloops engine** on top of the earlier build
 - **Energy-adaptive effects**: Detects drops, builds, breakdowns with dynamic intensity
 - **Color flash on beat**: Flash custom colors OR cycle through rainbow on every beat
 - **Live color wheel**: Real-time interactive color control with instant updates
+- **Manual control**: Override energy tier, manually trigger drops/builds, adjust sensitivity
+- **Alternating light effects**: 5 different A/B patterns (flash, on/off, colors, chase, opposite)
 - **Diagnostic logging**: CSV beat-by-beat logs for tuning and debugging
 - Still supports manual control, presets, brightness, vendor modes, blackout, white flash
 

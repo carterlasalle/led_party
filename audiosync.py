@@ -21,6 +21,7 @@ class BeatEvent:
     bass: float = 0.0
     mid: float = 0.0
     high: float = 0.0
+    onset_strength: float = 0.0  # 0..1 how hard the beat hit
 
 def _median(xs: List[float]) -> float:
     a = sorted(xs)
@@ -32,10 +33,10 @@ def _median(xs: List[float]) -> float:
 class AudioBeatDetector(threading.Thread):
     """
     Beat stream with robust BPM:
-      • Onset/beat detection (aubio if present; otherwise gated-RMS)
-      • Robust tempo from a pairwise-lag estimator over recent beats
-      • Half/double folding only; quick re-lock on real tempo change
-      • Silence watchdog resets between songs / when stopped
+      - Onset/beat detection (aubio if present; otherwise spectral-flux gated)
+      - Robust tempo from windowed pairwise-lag estimator over recent beats
+      - Half/double folding only; quick re-lock on real tempo change
+      - Silence watchdog resets between songs / when stopped
     """
     def __init__(self, device_index: Optional[int], sample_rate: int = 44100, hop_size: int = 1024,
                  on_beat: Optional[Callable[[BeatEvent], None]] = None):
@@ -47,28 +48,41 @@ class AudioBeatDetector(threading.Thread):
 
         self._running = threading.Event()
         self._running.clear()
-        self._q: "queue.Queue[np.ndarray]" = queue.Queue()
+        # Bounded queue: drop stale frames under load instead of backing up
+        self._q: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=8)
 
         # Beat timing
-        self._beats: Deque[float] = deque(maxlen=48)   # last beat timestamps (seconds)
+        self._beats: Deque[float] = deque(maxlen=48)
         self._last_beat_ts: Optional[float] = None
         self._bpm_stable: float = 0.0
         self._deviation_beats = 0
 
-        # Energy
+        # Energy tracking - faster EMA for transient response
         self._rms_ema = 0.0
+        self._rms_peak = 0.0  # recent peak for onset strength calculation
 
-        # Add spectral energy tracking (NEW)
+        # Spectral energy tracking
         self._fft_window = np.hanning(self.hop_size)
         self._bass_ema = 0.0
         self._mid_ema = 0.0
         self._high_ema = 0.0
 
+        # Spectral flux for onset detection (better fallback than RMS gating)
+        self._prev_spectrum: Optional[np.ndarray] = None
+        self._flux_ema = 0.0
+        self._onset_strength = 0.0
+
+        # Precompute frequency bin indices for band extraction
+        freqs = np.fft.rfftfreq(self.hop_size, 1.0 / self.sample_rate)
+        self._bass_mask = (freqs >= 20) & (freqs < 150)
+        self._mid_mask = (freqs >= 150) & (freqs < 4000)
+        self._high_mask = (freqs >= 4000) & (freqs < 12000)
+
         # Config (tuneable)
-        self._refractory = 0.25        # ignore re-triggers inside this (s) - was 0.18, now stricter to avoid double-hits
+        self._refractory = 0.25
         self._bpm_min, self._bpm_max = 70.0, 180.0
-        self._unlock_pct = 0.20        # relative delta to start counting deviants - was 0.12, now much stricter (20% change needed)
-        self._unlock_needed = 5        # beats beyond threshold needed to re-lock - was 3, now require more evidence
+        self._unlock_pct = 0.20
+        self._unlock_needed = 5
         self._silence_reset_seconds = 1.6
 
         # Aubio onset/tempo
@@ -84,18 +98,26 @@ class AudioBeatDetector(threading.Thread):
         self._bpm_stable = 0.0
         self._deviation_beats = 0
         self._rms_ema = 0.0
-        # Reset spectral EMAs too
+        self._rms_peak = 0.0
         self._bass_ema = 0.0
         self._mid_ema = 0.0
         self._high_ema = 0.0
+        self._prev_spectrum = None
+        self._flux_ema = 0.0
+        self._onset_strength = 0.0
 
     # -------- Internals --------
-    def _register_beat(self, t_now: float):
+    def _register_beat(self, t_now: float, rms: float):
         # Refractory to avoid double hits
         if self._last_beat_ts is not None and (t_now - self._last_beat_ts) < self._refractory:
             return
         self._last_beat_ts = t_now
         self._beats.append(t_now)
+
+        # Compute onset strength: how hard this beat is relative to recent peak
+        self._rms_peak = max(self._rms_peak * 0.95, rms)  # decay peak slowly
+        strength = min(1.0, rms / max(1e-6, self._rms_peak))
+        self._onset_strength = strength
 
         bpm_new = self._estimate_bpm_pairwise()
         if bpm_new <= 0:
@@ -109,11 +131,9 @@ class AudioBeatDetector(threading.Thread):
                 if rel > self._unlock_pct:
                     self._deviation_beats += 1
                     if self._deviation_beats >= self._unlock_needed:
-                        # accept the new tempo quickly
                         self._bpm_stable = bpm_new
                         self._deviation_beats = 0
                 else:
-                    # gently smooth when consistent
                     self._bpm_stable = 0.75 * self._bpm_stable + 0.25 * bpm_new
                     self._deviation_beats = max(0, self._deviation_beats - 1)
             bpm_out = self._bpm_stable
@@ -125,48 +145,51 @@ class AudioBeatDetector(threading.Thread):
                 rms=float(self._rms_ema),
                 bass=float(self._bass_ema),
                 mid=float(self._mid_ema),
-                high=float(self._high_ema)
+                high=float(self._high_ema),
+                onset_strength=float(self._onset_strength),
             ))
 
     def _estimate_bpm_pairwise(self) -> float:
         """
-        Robust period estimate from pairwise lags:
-          For all i<j in recent beats, compute per-beat period = (t[j]-t[i])/(j-i).
-          Take median of values in target tempo window (70..180 BPM).
-          Then fold (×2, ×0.5) to keep inside window.
+        Optimized period estimate: use only last 24 beats (windowed) and skip
+        pairs with large gaps to reduce O(n^2) to a practical ~200 pairs.
         """
         ts = list(self._beats)
         n = len(ts)
         if n < 6:
             return 0.0
 
+        # Use only the most recent 24 beats for BPM estimation
+        if n > 24:
+            ts = ts[-24:]
+            n = 24
+
         per_beats = []
+        min_dt = 60.0 / self._bpm_max
+        max_dt = 60.0 / self._bpm_min
+
         for i in range(n - 1):
             ti = ts[i]
-            for j in range(i + 1, n):
+            # Only compare with beats up to 8 positions ahead (reduces pairs)
+            for j in range(i + 1, min(i + 9, n)):
                 k = j - i
-                lag = ts[j] - ti
-                # convert to per-beat period
-                dt = lag / k
-                if 60.0 / self._bpm_max <= dt <= 60.0 / self._bpm_min:
+                dt = (ts[j] - ti) / k
+                if min_dt <= dt <= max_dt:
                     per_beats.append(dt)
 
-        if len(per_beats) < 6:
+        if len(per_beats) < 4:
             return 0.0
 
-        dt_med = _median(per_beats)       # robust per-beat period (s)
+        dt_med = _median(per_beats)
         bpm_raw = 60.0 / max(1e-6, dt_med)
 
-        # fold into window
+        # Fold into window, prefer stability
         candidates = [bpm_raw, bpm_raw * 2.0, bpm_raw * 0.5]
-        # Prefer staying near previous tempo if we have one
         if self._bpm_stable > 0:
             best = min(candidates, key=lambda c: abs(c - self._bpm_stable))
         else:
-            # Otherwise choose the one closest to a neutral 120 BPM within window
             in_win = [c for c in candidates if self._bpm_min <= c <= self._bpm_max]
             best = min(in_win or candidates, key=lambda c: abs(c - 120.0))
-        # Final clamp
         if best < self._bpm_min:
             best *= 2.0
         if best > self._bpm_max:
@@ -174,75 +197,102 @@ class AudioBeatDetector(threading.Thread):
         return float(best)
 
     def _analyze_spectrum(self, x: np.ndarray):
-        """Extract bass/mid/high energy for better detection"""
-        # Apply window to input chunk
+        """Extract bass/mid/high energy and compute spectral flux for onset detection."""
         windowed = x * self._fft_window
-        fft = np.fft.rfft(windowed)
-        mag = np.abs(fft)
-        freqs = np.fft.rfftfreq(len(x), 1/self.sample_rate)
+        spectrum = np.abs(np.fft.rfft(windowed))
 
-        # Frequency bands (sum of magnitudes)
-        bass_raw = np.sum(mag[(freqs >= 20) & (freqs < 150)])
-        mid_raw = np.sum(mag[(freqs >= 150) & (freqs < 4000)])
-        high_raw = np.sum(mag[(freqs >= 4000) & (freqs < 12000)])
-        
-        # MORE AGGRESSIVE NORMALIZATION - target: bass/high ≈ 0.5-1.5x RMS
-        # Based on testing: RMS=0.05-0.07, bass should be similar (not 10x smaller)
-        bass = bass_raw / (self.hop_size * 2.5)   # Was /5, now /2.5 (another 2x boost)
-        mid = mid_raw / (self.hop_size * 8)       # Keep same - mids are naturally louder
-        high = high_raw / (self.hop_size * 2.5)   # Was /3, now /2.5 (closer to bass scale)
+        # Band energies using precomputed masks
+        bass_raw = np.sum(spectrum[self._bass_mask])
+        mid_raw = np.sum(spectrum[self._mid_mask])
+        high_raw = np.sum(spectrum[self._high_mask])
 
-        # Smooth with exponential moving average
+        # Normalize by hop size
+        bass = bass_raw / (self.hop_size * 2.5)
+        mid = mid_raw / (self.hop_size * 8)
+        high = high_raw / (self.hop_size * 2.5)
+
+        # Smooth with EMA
         self._bass_ema = 0.7 * self._bass_ema + 0.3 * bass
         self._mid_ema = 0.7 * self._mid_ema + 0.3 * mid
         self._high_ema = 0.7 * self._high_ema + 0.3 * high
+
+        # Spectral flux: sum of positive differences from previous frame
+        if self._prev_spectrum is not None:
+            diff = spectrum - self._prev_spectrum
+            flux = float(np.sum(np.maximum(diff, 0)))
+            flux /= (self.hop_size * 4)  # normalize
+            self._flux_ema = 0.8 * self._flux_ema + 0.2 * flux
+        self._prev_spectrum = spectrum
 
         return (self._bass_ema, self._mid_ema, self._high_ema)
 
     def run(self):
         self._running.set()
+        last_energy_ts = time.time()  # track last significant energy, not just beats
 
         def callback(indata, frames, time_info, status):
-            if status:
-                # drop status warnings silently
-                pass
             x = indata if indata.ndim == 1 else np.mean(indata, axis=1)
-            self._q.put(x.astype(np.float32))
+            try:
+                self._q.put_nowait(x.astype(np.float32))
+            except queue.Full:
+                # Drop oldest frame if backed up, keep newest
+                try:
+                    self._q.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    self._q.put_nowait(x.astype(np.float32))
+                except queue.Full:
+                    pass
 
         with sd.InputStream(device=self.device_index, channels=1, samplerate=self.sample_rate,
                             blocksize=self.hop_size, callback=callback):
-            last_activity = time.time()
             while self._running.is_set():
                 now = time.time()
-                # Silence / inactivity watchdog → hard reset between songs
-                if (now - last_activity) > self._silence_reset_seconds and self._rms_ema < 0.02:
+
+                # Silence watchdog: reset on no significant energy (not just no beats)
+                if (now - last_energy_ts) > self._silence_reset_seconds and self._rms_ema < 0.02:
                     self.reset()
+                    last_energy_ts = now  # prevent repeated resets
 
                 try:
                     x = self._q.get(timeout=0.25)
                 except queue.Empty:
                     continue
 
-                # Energy tracking
+                # Energy tracking - faster response to transients
                 rms = float(np.sqrt(np.mean(x * x)))
-                self._rms_ema = 0.85 * self._rms_ema + 0.15 * rms
+                self._rms_ema = 0.75 * self._rms_ema + 0.25 * rms
 
-                # Spectral energy update (NEW)
-                self._analyze_spectrum(x)
+                # Track significant energy for silence watchdog
+                if rms > 0.02:
+                    last_energy_ts = now
 
-                # Beat detection
+                # Beat detection (run BEFORE _analyze_spectrum so
+                # the non-aubio path can use _prev_spectrum correctly)
                 beat_now = False
                 if HAVE_AUBIO:
                     is_beat = float(self._tempo(x).flatten()[0])
                     beat_now = (is_beat > 0.0)
                 else:
-                    # Simple adaptive gate fallback
-                    thr = max(0.05, 0.7 * self._rms_ema)
-                    beat_now = (rms > thr)
+                    # Spectral flux onset detection (better than simple RMS gating)
+                    if self._prev_spectrum is not None and self._flux_ema > 0:
+                        cur_spectrum = np.abs(np.fft.rfft(x * self._fft_window))
+                        flux = float(np.sum(np.maximum(
+                            cur_spectrum - self._prev_spectrum, 0
+                        ))) / (self.hop_size * 4)
+                        thr = max(0.05, 1.8 * self._flux_ema)
+                        beat_now = (flux > thr) and (rms > 0.03)
+                    else:
+                        # Startup: simple adaptive gate
+                        thr = max(0.05, 0.7 * self._rms_ema)
+                        beat_now = (rms > thr)
+
+                # Spectral analysis (updates _prev_spectrum and band EMAs)
+                self._analyze_spectrum(x)
 
                 if beat_now:
-                    last_activity = now
-                    self._register_beat(now)
+                    self._register_beat(now, rms)
 
     def stop(self):
         self._running.clear()

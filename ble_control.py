@@ -94,6 +94,11 @@ async def connect_and_identify(light: LightInfo, timeout: float = 8.0) -> LightH
         fam = await _probe_family(c, char_uuid)
         if fam is None:
             fam = "FFE9_56AA"  # default to HappyLighting-style
+        # Power on (wake) - try for both FFE9 and FFF3; FFF3 may ignore if unsupported
+        try:
+            await c.write_gatt_char(char_uuid, frame_power(True), response=False)
+        except Exception:
+            pass
         return LightHandle(light.address, light.name, char_uuid, fam)
 
 # ---------------------------
@@ -121,6 +126,11 @@ class _ClientPool:
             self._locks[h.address] = asyncio.Lock()
         if not cli.is_connected:
             await cli.connect()
+            # Power on (wake) - try for both FFE9 and FFF3; FFF3 may ignore if unsupported
+            try:
+                await cli.write_gatt_char(h.char_uuid, frame_power(True), response=False)
+            except Exception:
+                pass
         return cli
 
     async def write(self, h: LightHandle, payload: bytes):

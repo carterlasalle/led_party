@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
 import ble_control as ble
 from modes import MODES
 from audiosync import AudioBeatDetector, list_input_devices, BeatEvent
-from autoloops import AutoLoopsEngine, PALETTES
+from autoloops import AutoLoopsEngine, PALETTES, EnergyTier
 
 CONFIG_PATH = os.path.expanduser("~/.ksipze_lightdesk.json")
 
@@ -120,6 +120,9 @@ class MainWindow(QWidget):
         self.manual_energy_tier = None
         self.sensitivity_multiplier = 1.0
 
+        # flash overlap protection
+        self._flash_active = False
+
         # alternating effects
         self.alternating_enabled = False
         self.alternating_timer = QtCore.QTimer()
@@ -131,6 +134,10 @@ class MainWindow(QWidget):
             set_rgb=self._set_rgb_targets,
             set_mode=self._set_mode_targets,
             flash_white=self._flash_white_ms,
+            set_rgb_a=self._set_rgb_a,
+            set_rgb_b=self._set_rgb_b,
+            set_mode_a=self._set_mode_a,
+            set_mode_b=self._set_mode_b,
             base_color=self.last_color
         )
 
@@ -560,14 +567,78 @@ class MainWindow(QWidget):
             QtCore.Q_ARG(int, int(mid)), QtCore.Q_ARG(int, int(spd))
         )
 
+    # ---------- A/B independent control (for autoloops split effects) ----------
+    def _set_rgb_a(self, r, g, b):
+        if not self.lightA: return
+        bscale = self.s_brightness.value() / 100.0
+        r, g, b = int(r * bscale), int(g * bscale), int(b * bscale)
+        serialized = [self.lightA.__dict__]
+        QtCore.QMetaObject.invokeMethod(
+            self.ble_worker, "set_rgb_multi",
+            QtCore.Qt.ConnectionType.QueuedConnection,
+            QtCore.Q_ARG(list, serialized),
+            QtCore.Q_ARG(int, r), QtCore.Q_ARG(int, g), QtCore.Q_ARG(int, b), QtCore.Q_ARG(int, 0)
+        )
+
+    def _set_rgb_b(self, r, g, b):
+        if not self.lightB: return
+        bscale = self.s_brightness.value() / 100.0
+        r, g, b = int(r * bscale), int(g * bscale), int(b * bscale)
+        serialized = [self.lightB.__dict__]
+        QtCore.QMetaObject.invokeMethod(
+            self.ble_worker, "set_rgb_multi",
+            QtCore.Qt.ConnectionType.QueuedConnection,
+            QtCore.Q_ARG(list, serialized),
+            QtCore.Q_ARG(int, r), QtCore.Q_ARG(int, g), QtCore.Q_ARG(int, b), QtCore.Q_ARG(int, 0)
+        )
+
+    def _set_mode_a(self, mid, spd):
+        if not self.lightA: return
+        serialized = [self.lightA.__dict__]
+        QtCore.QMetaObject.invokeMethod(
+            self.ble_worker, "mode_multi",
+            QtCore.Qt.ConnectionType.QueuedConnection,
+            QtCore.Q_ARG(list, serialized),
+            QtCore.Q_ARG(int, int(mid)), QtCore.Q_ARG(int, int(spd))
+        )
+
+    def _set_mode_b(self, mid, spd):
+        if not self.lightB: return
+        serialized = [self.lightB.__dict__]
+        QtCore.QMetaObject.invokeMethod(
+            self.ble_worker, "mode_multi",
+            QtCore.Qt.ConnectionType.QueuedConnection,
+            QtCore.Q_ARG(list, serialized),
+            QtCore.Q_ARG(int, int(mid)), QtCore.Q_ARG(int, int(spd))
+        )
+
     def _flash_white_ms(self, ms:int):
+        if self._flash_active:
+            return
+        self._flash_active = True
         self._set_rgb_targets(255,255,255)
-        QtCore.QTimer.singleShot(ms, lambda: self._set_rgb_targets(*self.last_color))
+        QtCore.QTimer.singleShot(ms, self._end_flash)
+        # safety: auto-clear if timer somehow fails
+        QtCore.QTimer.singleShot(ms + 500, self._flash_safety_clear)
 
     def _flash_color_ms(self, rgb: tuple, ms: int):
         """Flash a specific color for specified duration, then return to last color"""
+        if self._flash_active:
+            return
+        self._flash_active = True
         self._set_rgb_targets(*rgb)
-        QtCore.QTimer.singleShot(ms, lambda: self._set_rgb_targets(*self.last_color))
+        QtCore.QTimer.singleShot(ms, self._end_flash)
+        QtCore.QTimer.singleShot(ms + 500, self._flash_safety_clear)
+
+    def _end_flash(self):
+        self._flash_active = False
+        # Only restore color if autoloops isn't actively controlling lights
+        if not self.autoloops_enabled:
+            self._set_rgb_targets(*self.last_color)
+
+    def _flash_safety_clear(self):
+        """Safety fallback: clear flash lock in case _end_flash didn't fire"""
+        self._flash_active = False
 
     # ---------- Discovery ----------
     def scan_devices(self):
@@ -631,6 +702,8 @@ class MainWindow(QWidget):
 
     # ---------- Manual control ----------
     def set_color(self, rgb):
+        # Clear any active flash so manual control takes priority
+        self._flash_active = False
         if rgb != (255,255,255):
             self.last_color = rgb
             self.engine.base_color = rgb
@@ -641,6 +714,7 @@ class MainWindow(QWidget):
         self._set_rgb_targets(*self.last_color)
 
     def activate_mode(self):
+        self._flash_active = False
         mid = self.combo_mode.currentData()
         spd = self.s_speed.value()
         self._set_mode_targets(mid, spd)
@@ -678,31 +752,26 @@ class MainWindow(QWidget):
         if ev.bpm > 0:
             self.lbl_bpm.setText(f"BPM: {ev.bpm:.1f}")
 
-        # EXACT flash on every beat, adaptive duration/energy
+        # Flash on every beat, adaptive duration by energy
         if self.cb_flash_on_beat.isChecked() or self.cb_color_flash_enabled.isChecked():
-            # Choose flash color based on mode
             if self.cb_color_flash_enabled.isChecked():
                 if self.rb_flash_cycle.isChecked():
-                    # Cycle through rainbow color wheel
                     flash_rgb = self.flash_color_wheel[self.flash_color_index]
                     self.flash_color_index = (self.flash_color_index + 1) % len(self.flash_color_wheel)
-                    # Update label to show current color
                     r, g, b = flash_rgb
                     self.lbl_flash_color.setText(f"● Cycling: RGB({r},{g},{b})")
                     self.lbl_flash_color.setStyleSheet(
                         f"font-weight: bold; font-size: 14px; color: rgb({r},{g},{b});"
                     )
                 else:
-                    # Use static picked color
                     flash_rgb = self.flash_color
             else:
-                flash_rgb = (255, 255, 255)  # White (original flash on beat)
-            
-            if self.autoloops_enabled and hasattr(self.engine, '_energy_tier'):
+                flash_rgb = (255, 255, 255)
+
+            if self.autoloops_enabled:
                 tier = self.engine._energy_tier()
-                from autoloops import EnergyTier  # To ensure enum is available
                 if tier == EnergyTier.HIGH:
-                    self._flash_color_ms(flash_rgb, 150)  # Longer, punchier on drops
+                    self._flash_color_ms(flash_rgb, 150)
                 elif tier == EnergyTier.MED:
                     self._flash_color_ms(flash_rgb, 90)
                 else:
@@ -711,23 +780,11 @@ class MainWindow(QWidget):
                 self._flash_color_ms(flash_rgb, 90)
 
         if self.autoloops_enabled:
-            # Show energy label (require _energy_tier on engine)
-            if hasattr(self.engine, '_energy_tier'):
-                tier = self.engine._energy_tier()
-                
-                # Apply sensitivity multiplier to thresholds
-                if self.sensitivity_multiplier != 1.0:
-                    self.engine._sensitivity_scale = self.sensitivity_multiplier
-                
-                # Apply manual energy override if active
-                if self.manual_mode and self.manual_energy_tier:
-                    from autoloops import EnergyTier
-                    tier_map = {"LOW": EnergyTier.LOW, "MED": EnergyTier.MED, "HIGH": EnergyTier.HIGH}
-                    tier = tier_map[self.manual_energy_tier]
-                
-                self.lbl_energy.setText(f"Energy: {tier.name} (RMS: {ev.rms:.3f})")
-            
-            self.engine.on_beat(ev.bpm, ev.rms, ev.high, ev.bass)
+            tier = self.engine._energy_tier()
+            sec = self.engine._section.name
+            fx = self.engine._effect.name
+            self.lbl_energy.setText(f"{tier.name} | {sec} | {fx} (RMS: {ev.rms:.3f})")
+            self.engine.on_beat(ev.bpm, ev.rms, ev.high, ev.bass, ev.onset_strength)
 
     def start_autoloops(self):
         self.engine.set_style(self.combo_style.currentText())
@@ -741,48 +798,38 @@ class MainWindow(QWidget):
     def toggle_manual_mode(self, checked):
         """Toggle between automatic and manual mode"""
         self.manual_mode = not checked  # auto_mode toggled, so manual is opposite
-        
+
         # Enable/disable manual buttons
         self.btn_manual_low.setEnabled(self.manual_mode)
         self.btn_manual_med.setEnabled(self.manual_mode)
         self.btn_manual_high.setEnabled(self.manual_mode)
-        
+
         if not self.manual_mode:
             self.manual_energy_tier = None
+            self.engine.set_manual_tier(None)
 
     def set_manual_energy(self, tier: str):
         """Set manual energy tier override"""
         self.manual_energy_tier = tier
         self.lbl_manual_energy.setText(f"Manual Energy Tier: {tier}")
-        
-        # Apply immediately to autoloops if active
-        if self.autoloops_enabled:
-            from autoloops import EnergyTier
-            tier_map = {"LOW": EnergyTier.LOW, "MED": EnergyTier.MED, "HIGH": EnergyTier.HIGH}
-            # Force the engine to use this tier (we'll modify handle_beat to check this)
+        tier_map = {"LOW": EnergyTier.LOW, "MED": EnergyTier.MED, "HIGH": EnergyTier.HIGH}
+        self.engine.set_manual_tier(tier_map[tier])
 
     def trigger_build_manually(self):
         """Manually trigger a build sequence"""
         if self.autoloops_enabled:
-            # Enter BUILD_FLASH program for 2 bars
-            self.engine._enter_program(
-                self.engine._program.__class__.BUILD_FLASH,
-                beats=self.engine.state.bar_len * 2,
-                bpm=120  # Default BPM
-            )
+            self.engine.force_build()
 
     def trigger_drop_manually(self):
         """Manually trigger a drop sequence"""
         if self.autoloops_enabled:
-            from autoloops import Program
-            # Force drop sequence: blackout → rainbow strobe
-            self.engine._drop_detected = True
-            self.engine._drop_countdown = 2
+            self.engine.force_drop()
 
     def update_sensitivity(self, value):
         """Update sensitivity multiplier for energy detection"""
         self.sensitivity_multiplier = value / 100.0  # 50-200 → 0.5-2.0
         self.lbl_sensitivity.setText(f"Sensitivity: {self.sensitivity_multiplier:.1f}x")
+        self.engine._sensitivity_scale = self.sensitivity_multiplier
 
     # ---------- Alternating Effects ----------
     def toggle_alternating(self, state):
@@ -875,37 +922,35 @@ class MainWindow(QWidget):
         if not self.beat_detector:
             QMessageBox.warning(self, "Error", "Start Audio Sync first!")
             return
-        
+
         print("\n" + "="*60)
         print("AUDIO DEBUG - Watching for 5 seconds...")
         print("="*60)
         print("Expected values:")
         print("  RMS: Silence=0.01-0.03, Music=0.05-0.15, Drops=0.20-0.40+")
         print("  Bass/High: Should be similar scale to RMS (0.0-1.0)")
+        print("  Onset: 0.0=weak, 1.0=strong hit")
         print("  BPM: Should lock within 5-10 beats")
         print("-"*60)
-        
-        def debug_callback(ev):
-            beat_num = self.engine.state.beat if self.autoloops_enabled else "N/A"
-            print(f"Beat #{beat_num}: "
-                  f"RMS={ev.rms:.4f} Bass={ev.bass:.4f} High={ev.high:.4f} "
-                  f"BPM={ev.bpm:.1f}")
-        
-        # Temporarily wrap callback
+
         old_callback = self.beat_detector.on_beat
         def wrapped_callback(ev):
             old_callback(ev)
-            debug_callback(ev)
-        
+            beat_num = self.engine.state.beat if self.autoloops_enabled else "N/A"
+            print(f"Beat #{beat_num}: "
+                  f"RMS={ev.rms:.4f} Bass={ev.bass:.4f} High={ev.high:.4f} "
+                  f"Onset={ev.onset_strength:.2f} BPM={ev.bpm:.1f}")
+
         self.beat_detector.on_beat = wrapped_callback
-        
-        # Restore after 5 seconds
-        QtCore.QTimer.singleShot(5000, lambda: (
-            setattr(self.beat_detector, 'on_beat', old_callback),
-            print("="*60),
-            print("DEBUG COMPLETE - Check values above"),
+
+        def restore_debug():
+            if self.beat_detector:
+                self.beat_detector.on_beat = old_callback
+            print("="*60)
+            print("DEBUG COMPLETE - Check values above")
             print("="*60 + "\n")
-        ))
+
+        QtCore.QTimer.singleShot(5000, restore_debug)
 
 def main():
     app = QApplication(sys.argv)

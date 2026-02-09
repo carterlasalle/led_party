@@ -107,6 +107,8 @@ Expected Values:
 
 ### BLE Connection Issues
 
+**Power-on on connection:** The app automatically sends a power-on command (`0xCC 0x23 0x33`) when connecting to lights. This wakes devices in standby so color/mode commands work immediately—no need to "turn on from phone first."
+
 **Persistent "Connect failed"**
 - Lights may be paired to another device (phone/tablet)
 - Power cycle the LED controller (unplug/replug)
@@ -170,6 +172,7 @@ led_party/
 - **BPM Range**: 70-180 BPM with half/double folding
 - **Energy Detection**: Triple EMA (fast/med/long) with ratio analysis
 - **Supported Devices**: HappyLighting, ELK-BLEDOM, Triones, QHM-series, generic BLE LED controllers
+- **Power-on on connect**: Sends wake command (`0xCC 0x23 0x33`) for both FFE9 and FFF3 protocols; fixes cold-connect / standby behavior
 
 For deep technical details on the BLE protocol, see **[PROTOCOL.md](PROTOCOL.md)**.
 

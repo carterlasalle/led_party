@@ -59,7 +59,13 @@ async with BleakClient(device_address) as client:
                 char_uuid = char.uuid
                 break
     
-    # 3. Send command (no response needed)
+    # 3. Power on (wake) - required for cold connect; send for both FFE9 and FFF3
+    try:
+        await client.write_gatt_char(char_uuid, bytes([0xCC, 0x23, 0x33]), response=False)
+    except Exception:
+        pass
+    
+    # 4. Send command (no response needed)
     await client.write_gatt_char(char_uuid, payload, response=False)
 ```
 
@@ -253,6 +259,8 @@ payload = bytes([0xCC, 0x23, 0x33])
 payload = bytes([0xCC, 0x24, 0x33])
 ```
 
+**Power-on on connection (critical):** Many controllers (including QHM-series) enter a standby/low-power state where they advertise but ignore RGB/mode commands until woken. Send power-on (`0xCC 0x23 0x33`) immediately after connecting—for **both** FFE9 and FFF3 devices. FFF3 devices may ignore it if unsupported, but it does not cause harm. Verified working on QHM-S281: without power-on on connect, color/mode writes do nothing; with it, control works immediately.
+
 ---
 
 ### Protocol B: FFF3 Family (0x7E-EF)
@@ -363,6 +371,24 @@ for beat in range(16):
 ---
 
 ## Connection Strategies
+
+### Power-on on Connection (Cold Connect) ⭐
+
+**Problem:** Controllers in standby advertise but ignore RGB/mode commands. Color clicks do nothing until the device is "woken."
+
+**Solution:** Send power-on (`0xCC 0x23 0x33`) immediately after every BLE connection—both during Assign and on lazy reconnect. Send for **all** protocol families (FFE9 and FFF3); FFF3 devices that don't support it will ignore the command harmlessly.
+
+```python
+# In connect_and_identify and in persistent pool _get_client (after connect):
+try:
+    await client.write_gatt_char(char_uuid, bytes([0xCC, 0x23, 0x33]), response=False)
+except Exception:
+    pass  # Don't fail connection if power-on fails
+```
+
+**When:** Right after `client.connect()`, before any other commands.
+
+---
 
 ### Strategy 1: Simple Multi-Write (High Latency)
 
@@ -1088,15 +1114,17 @@ class EffectsEngine:
 ### Key Takeaways
 
 1. **Two main protocols** (FFE9, FFF3) cover 90%+ of cheap BLE LED controllers
-2. **Auto-detection via RGB probe** works reliably
-3. **Persistent connections** required for real-time control (<50ms latency)
-4. **Mode commands create persistent state** - must send RGB to override
-5. **No pairing needed** - these are "just works" BLE devices
-6. **Speed parameter is inversely proportional** to actual speed (smaller = faster)
+2. **Power-on on connection** - Send `0xCC 0x23 0x33` immediately after connect for both FFE9 and FFF3; required to wake devices in standby (verified QHM-S281)
+3. **Auto-detection via RGB probe** works reliably
+4. **Persistent connections** required for real-time control (<50ms latency)
+5. **Mode commands create persistent state** - must send RGB to override
+6. **No pairing needed** - these are "just works" BLE devices
+7. **Speed parameter is inversely proportional** to actual speed (smaller = faster)
 
 ### What This Project Demonstrates
 
 This codebase implements:
+- ✅ Power-on on connection (wakes cold/standby devices)
 - ✅ Protocol auto-detection
 - ✅ Persistent connection pooling
 - ✅ Multi-device synchronization
